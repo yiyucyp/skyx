@@ -1,0 +1,149 @@
+#pragma once
+#include <../external/asio/asio.hpp>
+#include "handler_allocator.hpp"
+#include "cyclic_buffer.hpp"
+
+
+class session
+    : public std::enable_shared_from_this<session>
+{
+public:
+    session(asio::ip::tcp::socket socket)
+        : socket_(std::move(socket))
+        , strand_(socket_.get_io_context())
+        , read_buffer_(1024)
+        , write_buffer_(1024)
+    {
+    }
+    ~session()
+    {
+        assert( (state_ == state_none) || (state_ == state_stopped) );
+    }
+
+    void on_connect()
+    {
+        state_ = state_connected;
+    }
+    void async_stop()
+    {
+        state_ = state_async_stop;
+        auto self(shared_from_this());
+        strand_.post([this, self]() 
+        {
+            stop();
+        });
+    }
+    void async_start(asio::ip::tcp::resolver::results_type endpoints)
+    {
+        state_ = state_async_connect;
+        auto self(shared_from_this());
+        strand_.post( [this, self, endpoints]()
+        {
+            asio::async_connect(socket_, endpoints, [this](std::error_code ec, auto ep)
+            {
+                if (ec)
+                {
+                    return;
+                }
+            });
+        });
+    }
+
+    void send(char* data, std::size_t len)
+    {
+        cyclic_buffer::mutable_buffers_type send_buffer = write_buffer_.prepared();
+        size_t buf_size = asio::buffer_size(send_buffer);
+
+        if (buf_size < len)
+        {
+            assert(0);//关闭连接
+            return;
+        }
+        if (state_connected == state_)
+        {
+            asio::buffer_copy(send_buffer, asio::buffer(data, len));
+        }
+
+
+        // 发送请求的投递
+    }
+
+private:
+    // finally stop
+    void stop()
+    {
+        if (state_stopped == state_) return;
+        state_ = state_stopped;
+        std::error_code ec;
+        socket_.close(ec);
+    }
+
+    std::error_code shutdown_socket()
+    {
+
+        std::error_code ec;
+        socket_.shutdown(socket_.shutdown_send, ec);
+        return ec;
+    }
+    void start_read()
+    {
+        auto self(shared_from_this());
+        cyclic_buffer::mutable_buffers_type read_data = read_buffer_.prepared();
+        if (read_data.empty()) return;
+
+        socket_.async_read_some(read_data, 
+            make_custom_alloc_handler(read_allocator_,
+            [this, self](std::error_code ec, std::size_t length)
+        {
+            if (asio::error::eof == ec)
+            {
+                shutdown_socket();
+            }
+            if (ec) 
+            {
+                stop();
+                return;
+            }
+            read_buffer_.consume(length);
+
+            start_read();
+        }));
+    }
+    void start_write()
+    {
+        auto self(shared_from_this());
+        cyclic_buffer::const_buffers_type write_data = write_buffer_.data();
+        if (write_data.empty()) return;
+
+        asio::async_write(socket_, write_data,
+            make_custom_alloc_handler(write_allocator_,
+                [this, self](std::error_code ec, std::size_t length) 
+        {
+            if (ec)
+            {
+                stop();
+            }
+            write_buffer_.commit(length);
+            start_write();
+        }));
+    }
+    enum state
+    {
+        state_none,
+        state_async_connect,
+        state_async_accept,
+        state_connected,
+        state_async_stop,
+        state_shutdown,
+        state_stopped,
+    };
+    state state_ = state_none;
+
+    handler_allocator<512> read_allocator_;
+    handler_allocator<512> write_allocator_;
+
+    cyclic_buffer read_buffer_;
+    cyclic_buffer write_buffer_;
+    asio::ip::tcp::socket socket_;
+    asio::io_service::strand strand_;
+};
