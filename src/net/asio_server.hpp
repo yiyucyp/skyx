@@ -12,7 +12,7 @@
 #include <../external/asio/asio.hpp>
 
 
-template<typename session_type>
+//template<typename session_type>
 class asio_server
 {
 public:
@@ -21,11 +21,18 @@ public:
             , asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port))
         , thread_count_(thread_count)
     {
+    }
 
+    template<typename Handler>
+    void reg_handler_accept(Handler h)
+    {
+        handler_on_accept_ = h;
+    }
+    void start()
+    {
         do_accept();
         run_thread();
     }
-
     void stop() 
     {
         io_context_.stop();
@@ -41,10 +48,11 @@ private:
         acceptor_.async_accept(
             [this](std::error_code ec, asio::ip::tcp::socket socket)
         {
-            if (!ec)
+            if (!ec && handler_on_accept_)
             {
-                auto session = std::make_shared<session_type>(std::move(socket));
-                session->on_connect();
+                //auto session = std::make_shared<session_type>(std::move(socket));
+                //session->on_connect();
+                handler_on_accept_(std::move(socket));
             }
             do_accept();
         });
@@ -60,6 +68,7 @@ private:
             });
         }
     }
+    std::function<void(asio::ip::tcp::socket socket)> handler_on_accept_;
     asio::io_context io_context_;
     asio::ip::tcp::acceptor acceptor_;
     std::vector<std::thread> thread_pool_;
